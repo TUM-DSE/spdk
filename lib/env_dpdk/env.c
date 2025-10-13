@@ -23,7 +23,33 @@
 static __thread bool g_is_thread_unaffinitized;
 static bool g_enforce_numa;
 
+static int setshared = -1;
+
+#define HUGE_PAGE_SIZE (1 << 21)
+#define PAGE_SIZE (1 << 12)
+
+
 SPDK_STATIC_ASSERT(SOCKET_ID_ANY == SPDK_ENV_NUMA_ID_ANY, "SOCKET_ID_ANY mismatch");
+
+static int set_pages_shared_private(void *addr, unsigned int num_segs, int is_shared) {
+  if (setshared == -1) setshared = open("/proc/setshared", O_WRONLY);
+  char buf[40];
+
+  // Load entry into page table first
+  for (unsigned int i = 0; i < num_segs; ++i) {
+    char *ptr = (char*) addr + HUGE_PAGE_SIZE * i;
+    ptr[0] = 0;
+  }
+
+  int mode = (is_shared) ? 3 : 4;
+
+  snprintf(buf, sizeof(buf), "%d %p %d", mode, addr, num_segs);
+  int got = write(setshared, buf, strlen(buf));
+
+  RTE_LOG(DEBUG, EAL, "made address %p private: (%s) Result: %d\n ", addr, __func__, got);
+
+  return got;
+}
 
 void *
 spdk_malloc(size_t size, size_t align, uint64_t *unused, int numa_id, uint32_t flags)
@@ -127,10 +153,18 @@ spdk_memzone_reserve_aligned(const char *name, size_t len, int numa_id,
 		numa_id = SOCKET_ID_ANY;
 	}
 
-	mz = rte_memzone_reserve_aligned(name, len, numa_id, dpdk_flags, align);
-	if (mz == NULL && !g_enforce_numa && numa_id != SOCKET_ID_ANY) {
-		mz = rte_memzone_reserve_aligned(name, len, SOCKET_ID_ANY, dpdk_flags, align);
+	// The patched DPDK code cannot deal with SOCKET_ID_ANY at the moment
+	if (numa_id == SOCKET_ID_ANY) {
+		numa_id = 0;
 	}
+
+	// We can only switch shared on page level size so just copy their hack here
+	if (align < (1 << 12)) align = (1 << 12);
+	len = (len - 1 + align) & (-align); // Make it so that size is a multiple of (1 << 12)
+
+	unsigned int num_pages = len / (1 << 12);
+
+	mz = rte_memzone_reserve_shared_region(name, num_pages, numa_id, true);
 
 	if (mz != NULL) {
 		memset(mz->addr, 0, len);
@@ -165,7 +199,7 @@ spdk_memzone_free(const char *name)
 	const struct rte_memzone *mz = rte_memzone_lookup(name);
 
 	if (mz != NULL) {
-		return rte_memzone_free(mz);
+		return rte_memzone_free_shared_region(mz);
 	}
 
 	return -1;

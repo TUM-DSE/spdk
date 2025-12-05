@@ -155,6 +155,7 @@ nvme_pcie_qpair_construct(struct spdk_nvme_qpair *qpair,
 	pqpair->max_completions_cap = spdk_max(pqpair->max_completions_cap, NVME_MIN_COMPLETIONS);
 	pqpair->max_completions_cap = spdk_min(pqpair->max_completions_cap, NVME_MAX_COMPLETIONS);
 	num_trackers = pqpair->num_entries - pqpair->max_completions_cap;
+	pqpair->num_trackers = num_trackers;
 
 	NVME_QPAIR_INFOLOG(qpair, "max_completions_cap = %" PRIu16 " num_trackers = %" PRIu16 "\n",
 			   pqpair->max_completions_cap, num_trackers);
@@ -947,7 +948,7 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 		}
 		next_cpl = &pqpair->cpl[next_cq_head];
 		next_is_valid = (next_cpl->status.p == next_phase);
-		if (next_is_valid) {
+		if (next_is_valid && spdk_likely(next_cpl->cid < pqpair->num_trackers)) {
 			__builtin_prefetch(&pqpair->tr[next_cpl->cid]);
 		}
 
@@ -965,6 +966,15 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 		if (spdk_unlikely(++pqpair->cq_head == pqpair->num_entries)) {
 			pqpair->cq_head = 0;
 			pqpair->flags.phase = !pqpair->flags.phase;
+		}
+
+		/* Validate CID from untrusted DMA memory to prevent out-of-bounds access */
+		if (spdk_unlikely(cpl->cid >= pqpair->num_trackers)) {
+			NVME_QPAIR_ERRLOG(qpair, "Invalid cid %u from completion (max %u)\n",
+					  cpl->cid, pqpair->num_trackers - 1);
+			spdk_nvme_qpair_print_completion(qpair, cpl);
+			pqpair->pcie_state = NVME_PCIE_QPAIR_FAILED;
+			return -ENXIO;
 		}
 
 		tr = &pqpair->tr[cpl->cid];

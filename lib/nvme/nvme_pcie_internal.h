@@ -161,6 +161,8 @@ struct nvme_pcie_qpair {
 
 	uint16_t num_entries;
 
+	uint16_t num_trackers;
+
 	uint8_t pcie_state;
 
 	uint8_t retry_count;

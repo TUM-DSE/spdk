@@ -79,6 +79,30 @@ struct nvme_pcie_ctrlr {
 
 extern __thread struct nvme_pcie_ctrlr *g_thread_mmio_ctrlr;
 
+/*
+ * DMA buffer structure containing only NVMe required PRP and SQL structures.
+ * This is allocated with SPDK_MALLOC_DMA and is exactly 4KB to prevent PRP 
+ * list from crossing page boundaries.
+ */
+struct nvme_dma_prp_sgl_buffer {
+	/* Don't move, metadata SGL is always contiguous with Data Block SGL */
+	struct spdk_nvme_sgl_descriptor		meta_sgl;
+	union {
+		uint64_t			prp[NVME_MAX_PRP_LIST_ENTRIES];
+		struct spdk_nvme_sgl_descriptor	sgl[NVME_MAX_SGL_DESCRIPTORS];
+	} u;
+	/* reserved padding to make structure exactly 4KB */
+	uint8_t reserved54[54];
+};
+SPDK_STATIC_ASSERT(sizeof(struct nvme_dma_prp_sgl_buffer) == 4096, "nvme_dma_buffer is not 4K");
+SPDK_STATIC_ASSERT((offsetof(struct nvme_dma_prp_sgl_buffer, u.sgl) & 7) == 0, "SGL must be Qword aligned");
+SPDK_STATIC_ASSERT((offsetof(struct nvme_dma_prp_sgl_buffer, meta_sgl) & 7) == 0, "SGL must be Qword aligned");
+
+/*
+ * Tracker structure containing software-only metadata.
+ * This is allocated in normal (encrypted) memory.
+ * The dma_buf pointer references the corresponding DMA-accessible buffer.
+ */
 struct nvme_tracker {
 	TAILQ_ENTRY(nvme_tracker)       tq_list;
 
@@ -94,20 +118,9 @@ struct nvme_tracker {
 
 	uint64_t			prp_sgl_bus_addr;
 
-	/* Don't move, metadata SGL is always contiguous with Data Block SGL */
-	struct spdk_nvme_sgl_descriptor		meta_sgl;
-	union {
-		uint64_t			prp[NVME_MAX_PRP_LIST_ENTRIES];
-		struct spdk_nvme_sgl_descriptor	sgl[NVME_MAX_SGL_DESCRIPTORS];
-	} u;
+	/* Pointer to the DMA-accessible buffer */
+	struct nvme_dma_prp_sgl_buffer	*dma_buf;
 };
-/*
- * struct nvme_tracker must be exactly 4K so that the prp[] array does not cross a page boundary
- * and so that there is no padding required to meet alignment requirements.
- */
-SPDK_STATIC_ASSERT(sizeof(struct nvme_tracker) == 4096, "nvme_tracker is not 4K");
-SPDK_STATIC_ASSERT((offsetof(struct nvme_tracker, u.sgl) & 7) == 0, "SGL must be Qword aligned");
-SPDK_STATIC_ASSERT((offsetof(struct nvme_tracker, meta_sgl) & 7) == 0, "SGL must be Qword aligned");
 
 struct nvme_pcie_poll_group {
 	struct spdk_nvme_transport_poll_group group;
@@ -140,6 +153,9 @@ struct nvme_pcie_qpair {
 
 	/* Array of trackers indexed by command ID. */
 	struct nvme_tracker *tr;
+
+	/* Array of PRP/SGL DMA buffers indexed by command ID */
+	struct nvme_dma_prp_sgl_buffer *dma_bufs;
 
 	struct spdk_nvme_pcie_stat *stat;
 

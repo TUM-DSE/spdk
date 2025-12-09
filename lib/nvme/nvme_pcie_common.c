@@ -87,7 +87,7 @@ nvme_pcie_qpair_get_fd(struct spdk_nvme_qpair *qpair, struct spdk_event_handler_
 static void
 nvme_qpair_construct_tracker(struct nvme_tracker *tr, uint16_t cid, uint64_t phys_addr)
 {
-	tr->prp_sgl_bus_addr = phys_addr + offsetof(struct nvme_tracker, u.prp);
+	tr->prp_sgl_bus_addr = phys_addr + offsetof(struct nvme_dma_prp_sgl_buffer, u.prp);
 	tr->cid = cid;
 	tr->req = NULL;
 }
@@ -229,16 +229,26 @@ nvme_pcie_qpair_construct(struct spdk_nvme_qpair *qpair,
 	pqpair->sq_tdbl = pctrlr->doorbell_base + (2 * qpair->id + 0) * pctrlr->doorbell_stride_u32;
 	pqpair->cq_hdbl = pctrlr->doorbell_base + (2 * qpair->id + 1) * pctrlr->doorbell_stride_u32;
 
-	/*
-	 * Reserve space for all of the trackers in a single allocation.
-	 *   struct nvme_tracker must be padded so that its size is already a power of 2.
-	 *   This ensures the PRP list embedded in the nvme_tracker object will not span a
-	 *   4KB boundary, while allowing access to trackers in tr[] via normal array indexing.
-	 */
-	pqpair->tr = spdk_zmalloc(num_trackers * sizeof(*tr), sizeof(*tr), NULL,
-				  SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_SHARE | SPDK_MALLOC_DMA);
+	/* Allocate trackers itself do not need to be DMA memory. */
+	pqpair->tr = spdk_zmalloc(num_trackers * sizeof(*tr), 0, NULL,
+				  SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_SHARE);
 	if (pqpair->tr == NULL) {
 		NVME_QPAIR_ERRLOG(qpair, "nvme_tr failed\n");
+		return -ENOMEM;
+	}
+
+	/*
+	 * Allocate DMA buffers separately with SPDK_MALLOC_DMA flag.
+	 * These contain the PRP/SGL lists that hardware will DMA read.
+	 * Must be 4KB aligned to prevent PRP lists from crossing page boundaries.
+	 */
+	pqpair->dma_bufs = spdk_zmalloc(num_trackers * sizeof(struct nvme_dma_prp_sgl_buffer),
+					sizeof(struct nvme_dma_prp_sgl_buffer), NULL,
+					SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
+	if (pqpair->dma_bufs == NULL) {
+		NVME_QPAIR_ERRLOG(qpair, "nvme_dma_bufs failed\n");
+		spdk_free(pqpair->tr);
+		pqpair->tr = NULL;
 		return -ENOMEM;
 	}
 
@@ -248,7 +258,10 @@ nvme_pcie_qpair_construct(struct spdk_nvme_qpair *qpair,
 
 	for (i = 0; i < num_trackers; i++) {
 		tr = &pqpair->tr[i];
-		nvme_qpair_construct_tracker(tr, i, nvme_pcie_vtophys(ctrlr, tr, NULL));
+		/* Link tracker to its corresponding DMA buffer */
+		tr->dma_buf = &pqpair->dma_bufs[i];
+		/* Calculate physical address of the DMA buffer's PRP/SGL array */
+		nvme_qpair_construct_tracker(tr, i, nvme_pcie_vtophys(ctrlr, tr->dma_buf, NULL));
 		TAILQ_INSERT_HEAD(&pqpair->free_tr, tr, tq_list);
 	}
 
@@ -1049,6 +1062,9 @@ nvme_pcie_qpair_destroy(struct spdk_nvme_qpair *qpair)
 	if (pqpair->tr) {
 		spdk_free(pqpair->tr);
 	}
+	if (pqpair->dma_bufs) {
+		spdk_free(pqpair->dma_bufs);
+	}
 
 	nvme_qpair_deinit(qpair);
 
@@ -1256,7 +1272,7 @@ nvme_pcie_prp_list_append(struct spdk_nvme_ctrlr *ctrlr, struct nvme_tracker *tr
 		 * prp_index 0 is stored in prp1, and the rest are stored in the prp[] array,
 		 * so prp_index == count is valid.
 		 */
-		if (spdk_unlikely(i > SPDK_COUNTOF(tr->u.prp))) {
+		if (spdk_unlikely(i > SPDK_COUNTOF(tr->dma_buf->u.prp))) {
 			NVME_QPAIR_ERRLOG(tr->req->qpair, "out of PRP entries\n");
 			return -EFAULT;
 		}
@@ -1278,7 +1294,7 @@ nvme_pcie_prp_list_append(struct spdk_nvme_ctrlr *ctrlr, struct nvme_tracker *tr
 			}
 
 			NVME_QPAIR_DEBUGLOG(tr->req->qpair, "prp[%u] = %p\n", i - 1, (void *)phys_addr);
-			tr->u.prp[i - 1] = phys_addr;
+			tr->dma_buf->u.prp[i - 1] = phys_addr;
 			seg_len = page_size;
 		}
 
@@ -1292,7 +1308,7 @@ nvme_pcie_prp_list_append(struct spdk_nvme_ctrlr *ctrlr, struct nvme_tracker *tr
 	if (i <= 1) {
 		cmd->dptr.prp.prp2 = 0;
 	} else if (i == 2) {
-		cmd->dptr.prp.prp2 = tr->u.prp[0];
+		cmd->dptr.prp.prp2 = tr->dma_buf->u.prp[0];
 		NVME_QPAIR_DEBUGLOG(tr->req->qpair, "prp2 = %p\n", (void *)cmd->dptr.prp.prp2);
 	} else {
 		cmd->dptr.prp.prp2 = tr->prp_sgl_bus_addr;
@@ -1353,7 +1369,7 @@ nvme_pcie_qpair_build_contig_hw_sgl_request(struct spdk_nvme_qpair *qpair, struc
 	assert(req->payload_size != 0);
 	assert(nvme_payload_type(&req->payload) == NVME_PAYLOAD_TYPE_CONTIG);
 
-	sgl = tr->u.sgl;
+	sgl = tr->dma_buf->u.sgl;
 	req->cmd.psdt = SPDK_NVME_PSDT_SGL_MPTR_CONTIG;
 	req->cmd.dptr.sgl1.unkeyed.subtype = 0;
 
@@ -1403,8 +1419,8 @@ nvme_pcie_qpair_build_contig_hw_sgl_request(struct spdk_nvme_qpair *qpair, struc
 		 *  SGL element into SGL1.
 		 */
 		req->cmd.dptr.sgl1.unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
-		req->cmd.dptr.sgl1.address = tr->u.sgl[0].address;
-		req->cmd.dptr.sgl1.unkeyed.length = tr->u.sgl[0].unkeyed.length;
+		req->cmd.dptr.sgl1.address = tr->dma_buf->u.sgl[0].address;
+		req->cmd.dptr.sgl1.unkeyed.length = tr->dma_buf->u.sgl[0].unkeyed.length;
 	} else {
 		/* SPDK NVMe driver supports only 1 SGL segment for now, it is enough because
 		 *  NVME_MAX_SGL_DESCRIPTORS * 16 is less than one page.
@@ -1442,7 +1458,7 @@ nvme_pcie_qpair_build_hw_sgl_request(struct spdk_nvme_qpair *qpair, struct nvme_
 	assert(req->payload.next_sge_fn != NULL);
 	req->payload.reset_sgl_fn(req->payload.contig_or_cb_arg, req->payload_offset);
 
-	sgl = tr->u.sgl;
+	sgl = tr->dma_buf->u.sgl;
 	req->cmd.psdt = SPDK_NVME_PSDT_SGL_MPTR_CONTIG;
 	req->cmd.dptr.sgl1.unkeyed.subtype = 0;
 
@@ -1535,8 +1551,8 @@ nvme_pcie_qpair_build_hw_sgl_request(struct spdk_nvme_qpair *qpair, struct nvme_
 		 *  SGL element into SGL1.
 		 */
 		req->cmd.dptr.sgl1.unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
-		req->cmd.dptr.sgl1.address = tr->u.sgl[0].address;
-		req->cmd.dptr.sgl1.unkeyed.length = tr->u.sgl[0].unkeyed.length;
+		req->cmd.dptr.sgl1.address = tr->dma_buf->u.sgl[0].address;
+		req->cmd.dptr.sgl1.unkeyed.length = tr->dma_buf->u.sgl[0].unkeyed.length;
 	} else {
 		/* SPDK NVMe driver supports only 1 SGL segment for now, it is enough because
 		 *  NVME_MAX_SGL_DESCRIPTORS * 16 is less than one page.
@@ -1645,13 +1661,13 @@ nvme_pcie_qpair_build_metadata(struct spdk_nvme_qpair *qpair, struct nvme_tracke
 			assert(req->cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_CONTIG);
 			req->cmd.psdt = SPDK_NVME_PSDT_SGL_MPTR_SGL;
 
-			tr->meta_sgl.address = nvme_pcie_vtophys(qpair->ctrlr, md_payload, &mapping_length);
-			if (tr->meta_sgl.address == SPDK_VTOPHYS_ERROR || mapping_length != req->md_size) {
+			tr->dma_buf->meta_sgl.address = nvme_pcie_vtophys(qpair->ctrlr, md_payload, &mapping_length);
+			if (tr->dma_buf->meta_sgl.address == SPDK_VTOPHYS_ERROR || mapping_length != req->md_size) {
 				goto exit;
 			}
-			tr->meta_sgl.unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
-			tr->meta_sgl.unkeyed.length = req->md_size;
-			tr->meta_sgl.unkeyed.subtype = 0;
+			tr->dma_buf->meta_sgl.unkeyed.type = SPDK_NVME_SGL_TYPE_DATA_BLOCK;
+			tr->dma_buf->meta_sgl.unkeyed.length = req->md_size;
+			tr->dma_buf->meta_sgl.unkeyed.subtype = 0;
 			req->cmd.mptr = tr->prp_sgl_bus_addr - sizeof(struct spdk_nvme_sgl_descriptor);
 		} else {
 			req->cmd.mptr = nvme_pcie_vtophys(qpair->ctrlr, md_payload, &mapping_length);

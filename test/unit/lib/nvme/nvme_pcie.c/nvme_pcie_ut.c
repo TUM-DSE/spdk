@@ -128,13 +128,16 @@ DEFINE_STUB_V(spdk_nvme_qpair_print_completion, (struct spdk_nvme_qpair *qpair,
 		struct spdk_nvme_cpl *cpl));
 
 static void
-prp_list_prep(struct nvme_tracker *tr, struct nvme_request *req, uint32_t *prp_index,
+prp_list_prep(struct nvme_tracker *tr, struct nvme_dma_prp_sgl_buffer *dma_buf,
+	      struct nvme_request *req, uint32_t *prp_index,
 	      struct spdk_nvme_qpair *qpair)
 {
 	memset(req, 0, sizeof(*req));
 	memset(tr, 0, sizeof(*tr));
+	memset(dma_buf, 0, sizeof(*dma_buf));
 	req->qpair = qpair;
 	tr->req = req;
+	tr->dma_buf = dma_buf;
 	tr->prp_sgl_bus_addr = 0xDEADBEEF;
 	if (prp_index) {
 		*prp_index = 0;
@@ -148,35 +151,36 @@ test_prp_list_append(void)
 	struct spdk_nvme_qpair qpair = {.ctrlr = &ctrlr};
 	struct nvme_request req;
 	struct nvme_tracker tr;
+	struct nvme_dma_prp_sgl_buffer dma_buf;
 	uint32_t prp_index;
 
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	/* Non-DWORD-aligned buffer (invalid) */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100001, 0x1000,
 					    0x1000) == -EFAULT);
 
 	/* 512-byte buffer, 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x200, 0x1000) == 0);
 	CU_ASSERT(prp_index == 1);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100000);
 
 	/* 512-byte buffer, non-4K-aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x108000, 0x200, 0x1000) == 0);
 	CU_ASSERT(prp_index == 1);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x108000);
 
 	/* 4K buffer, 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x1000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 1);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100000);
 
 	/* 4K buffer, non-4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800, 0x1000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 2);
@@ -184,7 +188,7 @@ test_prp_list_append(void)
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == 0x101000);
 
 	/* 8K buffer, 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x2000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 2);
@@ -192,38 +196,38 @@ test_prp_list_append(void)
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == 0x101000);
 
 	/* 8K buffer, non-4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800, 0x2000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 3);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100800);
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == tr.prp_sgl_bus_addr);
-	CU_ASSERT(tr.u.prp[0] == 0x101000);
-	CU_ASSERT(tr.u.prp[1] == 0x102000);
+	CU_ASSERT(tr.dma_buf->u.prp[0] == 0x101000);
+	CU_ASSERT(tr.dma_buf->u.prp[1] == 0x102000);
 
 	/* 12K buffer, 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x3000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 3);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100000);
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == tr.prp_sgl_bus_addr);
-	CU_ASSERT(tr.u.prp[0] == 0x101000);
-	CU_ASSERT(tr.u.prp[1] == 0x102000);
+	CU_ASSERT(tr.dma_buf->u.prp[0] == 0x101000);
+	CU_ASSERT(tr.dma_buf->u.prp[1] == 0x102000);
 
 	/* 12K buffer, non-4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800, 0x3000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 4);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100800);
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == tr.prp_sgl_bus_addr);
-	CU_ASSERT(tr.u.prp[0] == 0x101000);
-	CU_ASSERT(tr.u.prp[1] == 0x102000);
-	CU_ASSERT(tr.u.prp[2] == 0x103000);
+	CU_ASSERT(tr.dma_buf->u.prp[0] == 0x101000);
+	CU_ASSERT(tr.dma_buf->u.prp[1] == 0x102000);
+	CU_ASSERT(tr.dma_buf->u.prp[2] == 0x103000);
 
 	/* Two 4K buffers, both 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x1000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 1);
@@ -234,7 +238,7 @@ test_prp_list_append(void)
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == 0x900000);
 
 	/* Two 4K buffers, first non-4K aligned, second 4K aligned */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800, 0x1000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 2);
@@ -243,11 +247,11 @@ test_prp_list_append(void)
 	CU_ASSERT(prp_index == 3);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100800);
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == tr.prp_sgl_bus_addr);
-	CU_ASSERT(tr.u.prp[0] == 0x101000);
-	CU_ASSERT(tr.u.prp[1] == 0x900000);
+	CU_ASSERT(tr.dma_buf->u.prp[0] == 0x101000);
+	CU_ASSERT(tr.dma_buf->u.prp[1] == 0x900000);
 
 	/* Two 4K buffers, both non-4K aligned (invalid) */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800, 0x1000,
 					    0x1000) == 0);
 	CU_ASSERT(prp_index == 2);
@@ -257,30 +261,30 @@ test_prp_list_append(void)
 
 	/* 4K buffer, 4K aligned, but vtophys fails */
 	MOCK_SET(spdk_vtophys, SPDK_VTOPHYS_ERROR);
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000, 0x1000,
 					    0x1000) == -EFAULT);
 	MOCK_CLEAR(spdk_vtophys);
 
 	/* Largest aligned buffer that can be described in NVME_MAX_PRP_LIST_ENTRIES (plus PRP1) */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000,
 					    (NVME_MAX_PRP_LIST_ENTRIES + 1) * 0x1000, 0x1000) == 0);
 	CU_ASSERT(prp_index == NVME_MAX_PRP_LIST_ENTRIES + 1);
 
 	/* Largest non-4K-aligned buffer that can be described in NVME_MAX_PRP_LIST_ENTRIES (plus PRP1) */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800,
 					    NVME_MAX_PRP_LIST_ENTRIES * 0x1000, 0x1000) == 0);
 	CU_ASSERT(prp_index == NVME_MAX_PRP_LIST_ENTRIES + 1);
 
 	/* Buffer too large to be described in NVME_MAX_PRP_LIST_ENTRIES */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100000,
 					    (NVME_MAX_PRP_LIST_ENTRIES + 2) * 0x1000, 0x1000) == -EFAULT);
 
 	/* Non-4K-aligned buffer too large to be described in NVME_MAX_PRP_LIST_ENTRIES */
-	prp_list_prep(&tr, &req, &prp_index, &qpair);
+	prp_list_prep(&tr, &dma_buf, &req, &prp_index, &qpair);
 	CU_ASSERT(nvme_pcie_prp_list_append(&ctrlr, &tr, &prp_index, (void *)0x100800,
 					    (NVME_MAX_PRP_LIST_ENTRIES + 1) * 0x1000, 0x1000) == -EFAULT);
 }
@@ -423,9 +427,11 @@ test_build_contig_hw_sgl_request(void)
 	struct spdk_nvme_qpair qpair = {};
 	struct nvme_request req = {};
 	struct nvme_tracker tr = {};
+	struct nvme_dma_prp_sgl_buffer dma_buf = {};
 	struct spdk_nvme_ctrlr ctrlr = {};
 	int rc;
 
+	tr.dma_buf = &dma_buf;
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	qpair.ctrlr = &ctrlr;
 	/* Test 1: Payload covered by a single mapping */
@@ -445,6 +451,8 @@ test_build_contig_hw_sgl_request(void)
 	memset(&qpair, 0, sizeof(qpair));
 	memset(&req, 0, sizeof(req));
 	memset(&tr, 0, sizeof(tr));
+	tr.dma_buf = &dma_buf;
+	memset(&dma_buf, 0, sizeof(dma_buf));
 
 	/* Test 2: Payload covered by a single mapping, but request is at an offset */
 	qpair.ctrlr = &ctrlr;
@@ -465,6 +473,8 @@ test_build_contig_hw_sgl_request(void)
 	memset(&qpair, 0, sizeof(qpair));
 	memset(&req, 0, sizeof(req));
 	memset(&tr, 0, sizeof(tr));
+	tr.dma_buf = &dma_buf;
+	memset(&dma_buf, 0, sizeof(dma_buf));
 
 	/* Test 3: Payload spans two mappings */
 	qpair.ctrlr = &ctrlr;
@@ -479,18 +489,20 @@ test_build_contig_hw_sgl_request(void)
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_LAST_SEGMENT);
 	CU_ASSERT(req.cmd.dptr.sgl1.address == tr.prp_sgl_bus_addr);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.length == 2 * sizeof(struct spdk_nvme_sgl_descriptor));
-	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 60);
-	CU_ASSERT(tr.u.sgl[0].address == 0xDEADBEEF);
-	CU_ASSERT(tr.u.sgl[1].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[1].unkeyed.length == 40);
-	CU_ASSERT(tr.u.sgl[1].address == 0xDEADBEEF);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.length == 60);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].address == 0xDEADBEEF);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].unkeyed.length == 40);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].address == 0xDEADBEEF);
 
 	MOCK_CLEAR(spdk_vtophys);
 	g_vtophys_size = 0;
 	memset(&qpair, 0, sizeof(qpair));
 	memset(&req, 0, sizeof(req));
 	memset(&tr, 0, sizeof(tr));
+	tr.dma_buf = &dma_buf;
+	memset(&dma_buf, 0, sizeof(dma_buf));
 }
 
 static void
@@ -499,10 +511,12 @@ test_nvme_pcie_qpair_build_metadata(void)
 	struct nvme_pcie_qpair pqpair = {};
 	struct spdk_nvme_qpair *qpair = &pqpair.qpair;
 	struct nvme_tracker tr = {};
+	struct nvme_dma_prp_sgl_buffer dma_buf = {};
 	struct nvme_request req = {};
 	struct spdk_nvme_ctrlr	ctrlr = {};
 	int rc;
 
+	tr.dma_buf = &dma_buf;
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	tr.req = &req;
 	qpair->ctrlr = &ctrlr;
@@ -522,10 +536,10 @@ test_nvme_pcie_qpair_build_metadata(void)
 	rc = nvme_pcie_qpair_build_metadata(qpair, &tr, true, true, true);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_SGL);
-	CU_ASSERT(tr.meta_sgl.address == 0xDCADBEE0);
-	CU_ASSERT(tr.meta_sgl.unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.meta_sgl.unkeyed.length == 4096);
-	CU_ASSERT(tr.meta_sgl.unkeyed.subtype == 0);
+	CU_ASSERT(tr.dma_buf->meta_sgl.address == 0xDCADBEE0);
+	CU_ASSERT(tr.dma_buf->meta_sgl.unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->meta_sgl.unkeyed.length == 4096);
+	CU_ASSERT(tr.dma_buf->meta_sgl.unkeyed.subtype == 0);
 	CU_ASSERT(req.cmd.mptr == (0xDBADBEEF - sizeof(struct spdk_nvme_sgl_descriptor)));
 
 	/* Non-IOVA contiguous metadata buffers should fail. */
@@ -545,15 +559,15 @@ test_nvme_pcie_qpair_build_metadata(void)
 	CU_ASSERT(req.cmd.mptr == 0xDDADBEE0);
 
 	/* Build non sgl metadata while sgls are supported */
-	memset(&tr.meta_sgl, 0, sizeof(tr.meta_sgl));
+	memset(&tr.dma_buf->meta_sgl, 0, sizeof(tr.dma_buf->meta_sgl));
 	/* If SGLs are supported, but not in metadata, the cmd.psdt
 	 * shall not be changed to SPDK_NVME_PSDT_SGL_MPTR_SGL
 	 */
 	req.cmd.psdt = SPDK_NVME_PSDT_SGL_MPTR_CONTIG;
 	rc = nvme_pcie_qpair_build_metadata(qpair, &tr, true, false, true);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(tr.meta_sgl.address == 0);
-	CU_ASSERT(tr.meta_sgl.unkeyed.length == 0);
+	CU_ASSERT(tr.dma_buf->meta_sgl.address == 0);
+	CU_ASSERT(tr.dma_buf->meta_sgl.unkeyed.length == 0);
 	CU_ASSERT(req.cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_CONTIG);
 	CU_ASSERT(req.cmd.mptr == 0xDDADBEE0);
 
@@ -610,10 +624,12 @@ test_nvme_pcie_qpair_build_prps_sgl_request(void)
 	struct spdk_nvme_qpair qpair = {};
 	struct nvme_request req = {};
 	struct nvme_tracker tr = {};
+	struct nvme_dma_prp_sgl_buffer dma_buf = {};
 	struct spdk_nvme_ctrlr ctrlr = {};
 	struct nvme_pcie_ut_bdev_io bio = {};
 	int rc;
 
+	tr.dma_buf = &dma_buf;
 	tr.req = &req;
 	qpair.ctrlr = &ctrlr;
 	req.payload = NVME_PAYLOAD_SGL(nvme_pcie_ut_reset_sgl, nvme_pcie_ut_next_sge, &bio, NULL);
@@ -634,10 +650,12 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 	struct spdk_nvme_qpair *qpair = &pqpair.qpair;
 	struct nvme_request req = {};
 	struct nvme_tracker tr = {};
+	struct nvme_dma_prp_sgl_buffer dma_buf = {};
 	struct nvme_pcie_ut_bdev_io bio = {};
 	struct spdk_nvme_ctrlr ctrlr = {};
 	int rc;
 
+	tr.dma_buf = &dma_buf;
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	qpair->ctrlr = &ctrlr;
 	req.payload = NVME_PAYLOAD_SGL(nvme_pcie_ut_reset_sgl, nvme_pcie_ut_next_sge, &bio, NULL);
@@ -657,17 +675,17 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 
 	rc = nvme_pcie_qpair_build_hw_sgl_request(qpair, &req, &tr, true);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 2048);
-	CU_ASSERT(tr.u.sgl[0].address == 0xDBADBEE0);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.subtype == 0);
-	CU_ASSERT(tr.u.sgl[1].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[1].unkeyed.length == 4096);
-	CU_ASSERT(tr.u.sgl[1].address == 0xDCADBEE0);
-	CU_ASSERT(tr.u.sgl[2].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[2].unkeyed.length == 2048);
-	CU_ASSERT(tr.u.sgl[2].unkeyed.length == 2048);
-	CU_ASSERT(tr.u.sgl[2].address == 0xDDADBEE0);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.length == 2048);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].address == 0xDBADBEE0);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.subtype == 0);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].unkeyed.length == 4096);
+	CU_ASSERT(tr.dma_buf->u.sgl[1].address == 0xDCADBEE0);
+	CU_ASSERT(tr.dma_buf->u.sgl[2].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[2].unkeyed.length == 2048);
+	CU_ASSERT(tr.dma_buf->u.sgl[2].unkeyed.length == 2048);
+	CU_ASSERT(tr.dma_buf->u.sgl[2].address == 0xDDADBEE0);
 	CU_ASSERT(req.cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_CONTIG);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.subtype == 0);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_LAST_SEGMENT);
@@ -676,8 +694,10 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 
 	/* Single vector */
 	memset(&tr, 0, sizeof(tr));
+	memset(&dma_buf, 0, sizeof(dma_buf));
 	memset(&bio, 0, sizeof(bio));
 	memset(&req, 0, sizeof(req));
+	tr.dma_buf = &dma_buf;
 	req.payload = NVME_PAYLOAD_SGL(nvme_pcie_ut_reset_sgl, nvme_pcie_ut_next_sge, &bio, NULL);
 	req.cmd.opc = SPDK_NVME_OPC_WRITE;
 	req.payload_size = 4096;
@@ -687,10 +707,10 @@ test_nvme_pcie_qpair_build_hw_sgl_request(void)
 
 	rc = nvme_pcie_qpair_build_hw_sgl_request(qpair, &req, &tr, true);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 4096);
-	CU_ASSERT(tr.u.sgl[0].address == 0xDBADBEE0);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.subtype == 0);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.length == 4096);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].address == 0xDBADBEE0);
+	CU_ASSERT(tr.dma_buf->u.sgl[0].unkeyed.subtype == 0);
 	CU_ASSERT(req.cmd.psdt == SPDK_NVME_PSDT_SGL_MPTR_CONTIG);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.subtype == 0);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
@@ -704,6 +724,7 @@ test_nvme_pcie_qpair_build_contig_request(void)
 	struct nvme_pcie_qpair pqpair = {};
 	struct nvme_request req = {};
 	struct nvme_tracker tr = {};
+	struct nvme_dma_prp_sgl_buffer dma_buf = {};
 	struct spdk_nvme_ctrlr ctrlr = {};
 	int rc;
 
@@ -711,7 +732,7 @@ test_nvme_pcie_qpair_build_contig_request(void)
 	ctrlr.page_size = 0x1000;
 
 	/* 1 prp, 4k-aligned */
-	prp_list_prep(&tr, &req, NULL, &pqpair.qpair);
+	prp_list_prep(&tr, &dma_buf, &req, NULL, &pqpair.qpair);
 	req.payload = NVME_PAYLOAD_CONTIG((void *)0x100000, NULL);
 	req.payload_size = 0x1000;
 
@@ -720,7 +741,7 @@ test_nvme_pcie_qpair_build_contig_request(void)
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100000);
 
 	/* 2 prps, non-4K-aligned */
-	prp_list_prep(&tr, &req, NULL, &pqpair.qpair);
+	prp_list_prep(&tr, &dma_buf, &req, NULL, &pqpair.qpair);
 	req.payload = NVME_PAYLOAD_CONTIG((void *)0x100000, NULL);
 	req.payload_size = 0x1000;
 	req.payload_offset = 0x800;
@@ -731,7 +752,7 @@ test_nvme_pcie_qpair_build_contig_request(void)
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == 0x101000);
 
 	/* 3 prps, 4k-aligned */
-	prp_list_prep(&tr, &req, NULL, &pqpair.qpair);
+	prp_list_prep(&tr, &dma_buf, &req, NULL, &pqpair.qpair);
 	req.payload = NVME_PAYLOAD_CONTIG((void *)0x100000, NULL);
 	req.payload_size = 0x3000;
 
@@ -739,11 +760,11 @@ test_nvme_pcie_qpair_build_contig_request(void)
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.dptr.prp.prp1 == 0x100000);
 	CU_ASSERT(req.cmd.dptr.prp.prp2 == tr.prp_sgl_bus_addr);
-	CU_ASSERT(tr.u.prp[0] == 0x101000);
-	CU_ASSERT(tr.u.prp[1] == 0x102000);
+	CU_ASSERT(tr.dma_buf->u.prp[0] == 0x101000);
+	CU_ASSERT(tr.dma_buf->u.prp[1] == 0x102000);
 
 	/* address not dword aligned */
-	prp_list_prep(&tr, &req, NULL, &pqpair.qpair);
+	prp_list_prep(&tr, &dma_buf, &req, NULL, &pqpair.qpair);
 	req.payload = NVME_PAYLOAD_CONTIG((void *)0x100001, NULL);
 	req.payload_size = 0x3000;
 	req.qpair = &pqpair.qpair;

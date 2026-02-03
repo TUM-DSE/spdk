@@ -35,9 +35,18 @@ spdk_malloc(size_t size, size_t align, uint64_t *unused, int numa_id, uint32_t f
 	}
 
 	align = spdk_max(align, RTE_CACHE_LINE_SIZE);
-	buf = rte_malloc_socket(NULL, size, align, numa_id);
+	if (flags & SPDK_MALLOC_DMA) {
+		buf = rte_cvm_shared_malloc_socket(NULL, size, align, numa_id);
+	} else {
+		buf = rte_malloc_socket(NULL, size, align, numa_id);
+	}
+
 	if (buf == NULL && !g_enforce_numa && numa_id != SOCKET_ID_ANY) {
-		buf = rte_malloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		if (flags & SPDK_MALLOC_DMA) {
+			buf = rte_cvm_shared_malloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		} else {
+			buf = rte_malloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		}
 	}
 	return buf;
 }
@@ -51,10 +60,18 @@ spdk_zmalloc(size_t size, size_t align, uint64_t *unused, int numa_id, uint32_t 
 		return NULL;
 	}
 
-	align = spdk_max(align, RTE_CACHE_LINE_SIZE);
-	buf = rte_zmalloc_socket(NULL, size, align, numa_id);
+	if (flags & SPDK_MALLOC_DMA) {
+		buf = rte_cvm_shared_zmalloc_socket(NULL, size, align, numa_id);
+	} else {
+		buf = rte_zmalloc_socket(NULL, size, align, numa_id);
+	}
+	
 	if (buf == NULL && !g_enforce_numa && numa_id != SOCKET_ID_ANY) {
-		buf = rte_zmalloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		if (flags & SPDK_MALLOC_DMA) {
+			buf = rte_cvm_shared_zmalloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		} else {
+			buf = rte_zmalloc_socket(NULL, size, align, SOCKET_ID_ANY);
+		}
 	}
 	return buf;
 }
@@ -109,7 +126,7 @@ spdk_dma_realloc(void *buf, size_t size, size_t align, uint64_t *unused)
 void
 spdk_dma_free(void *buf)
 {
-	spdk_free(buf);
+	rte_cvm_shared_free(buf);
 }
 
 void *
@@ -127,9 +144,9 @@ spdk_memzone_reserve_aligned(const char *name, size_t len, int numa_id,
 		numa_id = SOCKET_ID_ANY;
 	}
 
-	mz = rte_memzone_reserve_aligned(name, len, numa_id, dpdk_flags, align);
+	mz = rte_cvm_shared_memzone_reserve_aligned(name, len, numa_id, dpdk_flags, align);
 	if (mz == NULL && !g_enforce_numa && numa_id != SOCKET_ID_ANY) {
-		mz = rte_memzone_reserve_aligned(name, len, SOCKET_ID_ANY, dpdk_flags, align);
+		mz = rte_cvm_shared_memzone_reserve_aligned(name, len, SOCKET_ID_ANY, dpdk_flags, align);
 	}
 
 	if (mz != NULL) {
@@ -150,7 +167,7 @@ spdk_memzone_reserve(const char *name, size_t len, int numa_id, unsigned flags)
 void *
 spdk_memzone_lookup(const char *name)
 {
-	const struct rte_memzone *mz = rte_memzone_lookup(name);
+	const struct rte_memzone *mz = rte_cvm_shared_memzone_lookup(name);
 
 	if (mz != NULL) {
 		return mz->addr;
@@ -162,10 +179,10 @@ spdk_memzone_lookup(const char *name)
 int
 spdk_memzone_free(const char *name)
 {
-	const struct rte_memzone *mz = rte_memzone_lookup(name);
+	const struct rte_memzone *mz = rte_cvm_shared_memzone_lookup(name);
 
 	if (mz != NULL) {
-		return rte_memzone_free(mz);
+		return rte_cvm_shared_memzone_free(mz);
 	}
 
 	return -1;
@@ -199,11 +216,11 @@ spdk_mempool_create_ctor(const char *name, size_t count,
 		cache_size = RTE_MEMPOOL_CACHE_MAX_SIZE;
 	}
 
-	mp = rte_mempool_create(name, count, ele_size, cache_size,
+	mp = rte_cvm_shared_mempool_create(name, count, ele_size, cache_size,
 				0, NULL, NULL, (rte_mempool_obj_cb_t *)obj_init, obj_init_arg,
 				numa_id, 0);
 	if (mp == NULL && !g_enforce_numa && numa_id != SOCKET_ID_ANY) {
-		mp = rte_mempool_create(name, count, ele_size, cache_size,
+		mp = rte_cvm_shared_mempool_create(name, count, ele_size, cache_size,
 					0, NULL, NULL, (rte_mempool_obj_cb_t *)obj_init, obj_init_arg,
 					SOCKET_ID_ANY, 0);
 	}
